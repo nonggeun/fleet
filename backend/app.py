@@ -102,6 +102,14 @@ def update_robot_state(robot_id: str, payload: RobotStateUpdate) -> dict[str, An
     return robot.__dict__
 
 
+@app.delete("/api/robots/{robot_id}")
+def delete_robot(robot_id: str) -> dict[str, str]:
+    deleted = store.delete_robot(robot_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="robot not found")
+    return {"status": "deleted"}
+
+
 @app.get("/api/missions")
 def list_missions() -> list[dict[str, Any]]:
     return [mission.__dict__ for mission in store.list_missions()]

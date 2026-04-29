@@ -88,6 +88,13 @@ class FleetStore:
             self._robots[robot_id] = robot
             return robot
 
+    def delete_robot(self, robot_id: str) -> bool:
+        with self._lock:
+            if robot_id in self._robots:
+                del self._robots[robot_id]
+                return True
+            return False
+
     def list_missions(self) -> list[MissionRecord]:
         with self._lock:
             return sorted(self._missions.values(), key=lambda mission: mission.created_at, reverse=True)

@@ -1,62 +1,46 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:8081`;
 
+// HSFI 피킹 스테이션 — demand class는 미션 데이터에서 동적으로 계산
 const STATIONS = [
-  { id: "HSFI_PICK_STATION_1", label: "HSFI 1", x: 24, y: 28 },
-  { id: "HSFI_PICK_STATION_2", label: "HSFI 2", x: 48, y: 28 },
-  { id: "HSFI_PICK_STATION_3", label: "HSFI 3", x: 24, y: 62 },
-  { id: "HSFI_PICK_STATION_4", label: "HSFI 4", x: 48, y: 62 },
+  { id: "HSFI_PICK_STATION_1", label: "HSFI 1", x: 22, y: 26 },
+  { id: "HSFI_PICK_STATION_2", label: "HSFI 2", x: 22, y: 64 },
+  { id: "HSFI_PICK_STATION_3", label: "HSFI 3", x: 46, y: 26 },
+  { id: "HSFI_PICK_STATION_4", label: "HSFI 4", x: 46, y: 64 },
 ];
 
 const RACK_TOTAL = 450;
 const SKU_PER_RACK = 28;
-const ROBOT_TARGET = 4;
 
 const DEMAND_CLASSES = [
-  { id: "A", label: "A급 핫존", racks: 68, share: 58, color: "hot", note: "출고 빈도 높음" },
-  { id: "B", label: "B급 표준존", racks: 157, share: 32, color: "steady", note: "일반 주문" },
-  { id: "C", label: "C급 롱테일", racks: 225, share: 10, color: "slow", note: "저빈도 보충" },
-];
-
-const WORKFLOW_STEPS = [
-  { label: "WMS 주문", text: "SKU, 수량, 납기, 렉 위치 수신" },
-  { label: "수요 분류", text: "A/B/C 등급과 핫존 병목 확인" },
-  { label: "배치 생성", text: "가까운 렉끼리 20~30장 박스 작업으로 묶음" },
-  { label: "로봇 배정", text: "거리, 배터리, 큐, 혼잡도 점수로 4대에 분배" },
-  { label: "피킹/하차", text: "렉에서 의류 피킹 후 BOX_DROP_ZONE에 완료" },
+  { id: "A", label: "A 고회전", racks: 68, share: 58, color: "hot", note: "우선 출고 대상" },
+  { id: "B", label: "B 중회전", racks: 157, share: 32, color: "steady", note: "일반 주문 처리" },
+  { id: "C", label: "C 저회전", racks: 225, share: 10, color: "slow", note: "비정기 보충 출고" },
 ];
 
 const RACK_WAVES = [
-  { id: "WAVE-A1", demand: "A", rackGroup: "R001-R068", station: "HSFI_PICK_STATION_1", quantity: 30, load: 92 },
-  { id: "WAVE-B1", demand: "B", rackGroup: "R069-R180", station: "HSFI_PICK_STATION_2", quantity: 26, load: 64 },
-  { id: "WAVE-A2", demand: "A", rackGroup: "R181-R240", station: "HSFI_PICK_STATION_3", quantity: 28, load: 81 },
-  { id: "WAVE-C1", demand: "C", rackGroup: "R241-R450", station: "HSFI_PICK_STATION_4", quantity: 22, load: 36 },
+  { id: "WAVE-A1", demand: "A", rackGroup: "R001-R068", station: "HSFI_PICK_STATION_1", quantity: 30 },
+  { id: "WAVE-B1", demand: "B", rackGroup: "R069-R180", station: "HSFI_PICK_STATION_2", quantity: 26 },
+  { id: "WAVE-A2", demand: "A", rackGroup: "R181-R240", station: "HSFI_PICK_STATION_3", quantity: 28 },
+  { id: "WAVE-C1", demand: "C", rackGroup: "R241-R450", station: "HSFI_PICK_STATION_4", quantity: 22 },
 ];
 
 const PENDING_STATES = new Set(["RECEIVED", "ASSIGNED"]);
 const ACTIVE_STATES = new Set(["NAVIGATING", "ARRIVED", "PICKING", "PLACING"]);
 const ISSUE_STATES = new Set(["FAILED", "CANCELED"]);
+const CANCELLABLE_STATES = new Set(["RECEIVED", "ASSIGNED", "NAVIGATING", "ARRIVED"]);
+
+const DEMAND_PRIORITY = { a: 3, b: 2, c: 1, idle: 0 };
 
 function stateLabel(state) {
   const labels = {
-    offline: "오프라인",
-    idle: "대기",
-    assigned: "배정됨",
-    moving: "이동 중",
-    picking: "피킹 중",
-    error: "장애",
-    RECEIVED: "접수",
-    ASSIGNED: "배정",
-    NAVIGATING: "이동 중",
-    ARRIVED: "도착",
-    PICKING: "피킹",
-    PLACING: "하차 중",
-    COMPLETED: "완료",
-    FAILED: "실패",
-    CANCELED: "취소",
+    offline: "오프라인", idle: "대기", assigned: "배정됨", moving: "이동 중",
+    picking: "피킹 중", error: "장애",
+    RECEIVED: "접수", ASSIGNED: "배정", NAVIGATING: "이동 중", ARRIVED: "도착",
+    PICKING: "피킹", PLACING: "하차 중", COMPLETED: "완료", FAILED: "실패", CANCELED: "취소",
   };
   return labels[state] || state || "-";
 }
@@ -91,18 +75,40 @@ async function apiRequest(path, options = {}) {
   return response.json();
 }
 
-function Header({ activeTab, setActiveTab, openRobotModal, openWorkModal, refresh, lastUpdated }) {
+// ── Toast ──────────────────────────────────────────────────────────────────
+
+function Toasts({ toasts }) {
+  if (!toasts.length) return null;
+  return (
+    <div className="toast-stack">
+      {toasts.map((t) => (
+        <div key={t.id} className={`toast toast-${t.type}`}>{t.message}</div>
+      ))}
+    </div>
+  );
+}
+
+// ── Error banner ───────────────────────────────────────────────────────────
+
+function ErrorBanner() {
+  return (
+    <div className="error-banner">
+      API 서버에 연결할 수 없습니다 — 백엔드 상태를 확인하세요.
+    </div>
+  );
+}
+
+// ── Header ─────────────────────────────────────────────────────────────────
+
+function Header({ activeTab, setActiveTab, openRobotModal, openWorkModal, onSampleData, refresh, lastUpdated, isConnected, loading }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const tabs = [
     { id: "dashboard", label: "대시보드" },
+    { id: "robots", label: "로봇" },
     { id: "work", label: "작업 큐" },
     { id: "events", label: "이벤트" },
   ];
-
-  const selectTab = (tab) => {
-    setActiveTab(tab);
-    setMenuOpen(false);
-  };
+  const selectTab = (tab) => { setActiveTab(tab); setMenuOpen(false); };
 
   return (
     <header className="topbar">
@@ -112,9 +118,7 @@ function Header({ activeTab, setActiveTab, openRobotModal, openWorkModal, refres
         aria-label="메뉴 열기"
         aria-expanded={menuOpen}
       >
-        <span />
-        <span />
-        <span />
+        <span /><span /><span />
       </button>
 
       <div className="brand">
@@ -124,87 +128,175 @@ function Header({ activeTab, setActiveTab, openRobotModal, openWorkModal, refres
 
       <nav className={`tabs ${menuOpen ? "open" : ""}`}>
         {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            className={activeTab === tab.id ? "active" : ""}
-            onClick={() => selectTab(tab.id)}
-          >
+          <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => selectTab(tab.id)}>
             {tab.label}
           </button>
         ))}
       </nav>
 
       <div className="top-actions">
+        <span className={`live-dot ${isConnected ? "connected" : "disconnected"}`} title={isConnected ? "서버 연결됨" : "서버 연결 끊김"} />
         <span className="last-updated">{lastUpdated || "-"}</span>
+        <button className="secondary-button" onClick={onSampleData}>샘플 데이터</button>
         <button className="secondary-button" onClick={openRobotModal}>로봇 추가</button>
         <button onClick={openWorkModal}>작업 지시</button>
-        <button className="icon-button" onClick={refresh} title="새로고침">↻</button>
+        <button className={`icon-button ${loading ? "spinning" : ""}`} onClick={refresh} title="새로고침">↻</button>
       </div>
     </header>
   );
 }
 
+// ── Summary ────────────────────────────────────────────────────────────────
+
 function Summary({ robots, missions }) {
+  const completed = missions.filter((m) => m.state === "COMPLETED").length;
   const activeTarget = missions
-    .filter((mission) => !["COMPLETED", "FAILED", "CANCELED"].includes(mission.state))
-    .reduce((sum, mission) => sum + (mission.target_quantity || 0), 0);
-  const issues = robots.filter((robot) => robot.state === "error" || robot.estop).length
-    + missions.filter((mission) => ISSUE_STATES.has(mission.state)).length;
+    .filter((m) => !["COMPLETED", "FAILED", "CANCELED"].includes(m.state))
+    .reduce((sum, m) => sum + (m.target_quantity || 0), 0);
+  const issues = robots.filter((r) => r.state === "error" || r.estop).length
+    + missions.filter((m) => ISSUE_STATES.has(m.state)).length;
 
   return (
     <section className="summary-grid">
       <SummaryCard label="운영 로봇" value={robots.length} />
-      <SummaryCard label="대기 작업" value={missions.filter((mission) => PENDING_STATES.has(mission.state)).length} />
-      <SummaryCard label="진행 작업" value={missions.filter((mission) => ACTIVE_STATES.has(mission.state)).length} />
+      <SummaryCard label="대기 작업" value={missions.filter((m) => PENDING_STATES.has(m.state)).length} />
+      <SummaryCard label="진행 작업" value={missions.filter((m) => ACTIVE_STATES.has(m.state)).length} />
+      <SummaryCard label="완료 작업" value={completed} success />
       <SummaryCard label="피킹 목표" value={activeTarget} />
       <SummaryCard label="장애/실패" value={issues} danger />
     </section>
   );
 }
 
-function SummaryCard({ label, value, danger }) {
+function SummaryCard({ label, value, danger, success }) {
+  const cls = danger ? "danger" : success ? "success" : "";
   return (
-    <article className={`summary-card ${danger ? "danger" : ""}`}>
+    <article className={`summary-card ${cls}`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
   );
 }
 
-function CommandPanel({ robots, missions, openWorkModal }) {
-  const activeMissions = missions.filter((mission) => !["COMPLETED", "FAILED", "CANCELED"].includes(mission.state));
-  const robotReady = robots.filter((robot) => robot.state !== "offline" && !robot.estop).length;
-  const utilization = Math.round((Math.min(robotReady, ROBOT_TARGET) / ROBOT_TARGET) * 100);
+// ── Map (실시간 작업 구역) ──────────────────────────────────────────────────
+
+function MapPanel({ robots, missions }) {
+  // 각 스테이션에서 가장 높은 우선도의 demand class 계산
+  const stationDemand = useMemo(() => {
+    const map = {};
+    STATIONS.forEach((s) => { map[s.id] = "idle"; });
+    missions.forEach((m) => {
+      if (!ACTIVE_STATES.has(m.state) && !PENDING_STATES.has(m.state)) return;
+      const dc = (m.demand_class || "").toLowerCase();
+      if (!dc) return;
+      missionStations(m).forEach((sid) => {
+        if (!(sid in map)) return;
+        if ((DEMAND_PRIORITY[dc] || 0) > (DEMAND_PRIORITY[map[sid]] || 0)) {
+          map[sid] = dc;
+        }
+      });
+    });
+    return map;
+  }, [missions]);
+
+  const stationCount = useMemo(() => {
+    const map = {};
+    STATIONS.forEach((s) => { map[s.id] = 0; });
+    missions.forEach((m) => {
+      if (!ACTIVE_STATES.has(m.state) && !PENDING_STATES.has(m.state)) return;
+      missionStations(m).forEach((sid) => {
+        if (sid in map) map[sid]++;
+      });
+    });
+    return map;
+  }, [missions]);
 
   return (
-    <section className="command-panel">
-      <div className="command-copy">
-        <span className="eyebrow">HSFI PICKING CONTROL</span>
-        <h1>수요가 몰리는 렉부터 4대 로봇에 자동 분배</h1>
-        <p>450개 렉 선반, 렉당 28개 의류 SKU를 WMS 수요 기준으로 묶고 20~30장 박스 피킹 미션으로 전환합니다.</p>
+    <section className="panel map-panel">
+      <div className="panel-header">
+        <div>
+          <h2>작업 구역</h2>
+          <p>HSFI 피킹 위치와 로봇 실시간 좌표 — 3초 자동 갱신</p>
+        </div>
+        <span className="live-badge">● LIVE</span>
       </div>
-      <div className="command-metrics">
-        <div><span>렉 선반</span><strong>{RACK_TOTAL}</strong></div>
-        <div><span>SKU 적치 슬롯</span><strong>{RACK_TOTAL * SKU_PER_RACK}</strong></div>
-        <div><span>로봇 가동률</span><strong>{utilization}%</strong></div>
-        <div><span>열린 배치</span><strong>{activeMissions.length}</strong></div>
+      <div className="fleet-map">
+        {/* 렉 구역 배경 */}
+        <div className="map-rack-zone" />
+
+        {/* 이동 통로 */}
+        <div className="map-path main" />
+        <div className="map-path branch branch-left" />
+        <div className="map-path branch branch-right" />
+
+        {/* 고정 구역 */}
+        <div className="map-zone dock"><strong>HOME</strong><span>대기 / 충전</span></div>
+        <div className="map-zone drop"><strong>DROP</strong><span>BOX_DROP_ZONE_1</span></div>
+
+        {/* HSFI 피킹 스테이션 — demand class 동적 색상 */}
+        {STATIONS.map((station) => {
+          const dc = stationDemand[station.id];
+          const cnt = stationCount[station.id];
+          return (
+            <div
+              key={station.id}
+              className={`map-pick-station demand-${dc}`}
+              style={{ left: `${station.x}%`, top: `${station.y}%` }}
+            >
+              <strong>{station.label}</strong>
+              <span>{dc !== "idle" ? `${dc.toUpperCase()}등급` : "대기"}</span>
+              {cnt > 0 && <em>{cnt}건</em>}
+            </div>
+          );
+        })}
+
+        {/* 로봇 마커 */}
+        {robots.length ? robots.map((robot, index) => (
+          <RobotMarker key={robot.robot_id} robot={robot} index={index} />
+        )) : (
+          <p className="map-empty">로봇 위치 데이터 없음</p>
+        )}
       </div>
-      <button onClick={openWorkModal}>배치 피킹 작업 생성</button>
     </section>
   );
 }
 
+function RobotMarker({ robot, index }) {
+  const hasPose = robot.pose_x_m != null && robot.pose_y_m != null;
+  const x = hasPose ? Math.max(4, Math.min(96, Number(robot.pose_x_m) * 9)) : 72 + index * 5;
+  const y = hasPose ? Math.max(4, Math.min(96, 100 - Number(robot.pose_y_m) * 9)) : 78;
+  const heading = robot.heading_deg == null ? 0 : robot.heading_deg;
+  const isActive = robot.state === "moving" || robot.state === "picking";
+
+  return (
+    <>
+      <div
+        className={`robot-marker ${stateClass(robot.state)} ${isActive ? "pulsing" : ""}`}
+        style={{ left: `${x}%`, top: `${y}%`, transform: `translate(-50%, -50%) rotate(${heading}deg)` }}
+        title={robot.robot_id}
+      >
+        <span />
+      </div>
+      <div className="marker-label" style={{ left: `${x}%`, top: `calc(${y}% + 18px)` }}>
+        {robot.robot_id}
+      </div>
+    </>
+  );
+}
+
+// ── Demand ─────────────────────────────────────────────────────────────────
+
 function DemandPanel({ missions }) {
-  const activeCount = missions.filter((mission) => ACTIVE_STATES.has(mission.state)).length;
+  const activeCount = missions.filter((m) => ACTIVE_STATES.has(m.state)).length;
 
   return (
     <section className="panel demand-panel">
       <div className="panel-header">
         <div>
           <h2>수요 기반 렉 분류</h2>
-          <p>많이 나가는 SKU가 있는 렉을 먼저 묶어 이동 낭비를 줄입니다.</p>
+          <p>출고 빈도로 나눈 A/B/C 등급 — 고회전 렉부터 묶어 이동 낭비를 줄입니다.</p>
         </div>
-        <span className="panel-note">ACTIVE {activeCount}</span>
+        <span className="panel-note">진행 {activeCount}건</span>
       </div>
       <div className="demand-board">
         {DEMAND_CLASSES.map((item) => (
@@ -234,47 +326,79 @@ function DemandPanel({ missions }) {
   );
 }
 
+// ── Allocation (실제 데이터 기반) ──────────────────────────────────────────
+
 function AllocationPanel({ robots, missions }) {
-  const lanes = Array.from({ length: ROBOT_TARGET }, (_, index) => {
-    const robot = robots[index] || null;
-    const wave = RACK_WAVES[index];
-    const queueCount = robot ? missions.filter((mission) => mission.robot_id === robot.robot_id).length : 0;
-    const battery = robot?.battery_percent ?? 0;
-    const batteryPenalty = robot ? Math.round((100 - battery) * 0.3) : 30;
-    const queuePenalty = queueCount * 12;
-    const distancePenalty = robot?.pose_x_m == null ? 18 : Math.round(Math.abs(Number(robot.pose_x_m) - (index + 1) * 2.4) * 1.8);
-    const score = 40 + batteryPenalty + queuePenalty + distancePenalty;
-    return { robot, wave, queueCount, score };
+  const unassigned = missions.filter(
+    (m) => PENDING_STATES.has(m.state) && !m.robot_id,
+  ).length;
+
+  const robotStats = robots.map((robot) => {
+    const own = missions.filter(
+      (m) => m.robot_id === robot.robot_id && !["COMPLETED", "FAILED", "CANCELED"].includes(m.state),
+    );
+    const active = own.find((m) => ACTIVE_STATES.has(m.state)) || null;
+    const pending = own.filter((m) => PENDING_STATES.has(m.state)).length;
+    return { robot, active, pending };
   });
 
   return (
     <section className="panel allocation-panel">
       <div className="panel-header">
         <div>
-          <h2>4대 로봇 분배안</h2>
-          <p>거리, 배터리, 대기 큐, 통로 혼잡도를 점수화합니다.</p>
+          <h2>로봇 배정 현황</h2>
+          <p>각 로봇의 현재 작업과 대기 큐</p>
         </div>
+        {unassigned > 0 && <span className="panel-note warn">미배정 {unassigned}건</span>}
       </div>
-      <div className="allocation-list">
-        {lanes.map((lane, index) => (
-          <article className="allocation-lane" key={lane.robot?.robot_id || lane.wave.id}>
-            <div>
-              <span>ROBOT {index + 1}</span>
-              <strong>{lane.robot?.robot_id || "미등록"}</strong>
-            </div>
-            <em className={`demand-pill ${lane.wave.demand.toLowerCase()}`}>{lane.wave.demand}급</em>
-            <dl>
-              <div><dt>다음 렉</dt><dd>{lane.wave.rackGroup}</dd></div>
-              <div><dt>목표</dt><dd>{lane.wave.quantity}장</dd></div>
-              <div><dt>큐</dt><dd>{lane.queueCount}</dd></div>
-              <div><dt>점수</dt><dd>{lane.score}</dd></div>
-            </dl>
-          </article>
-        ))}
-      </div>
+      {robots.length ? (
+        <div className="allocation-list">
+          {robotStats.map(({ robot, active, pending }) => (
+            <article className="allocation-lane" key={robot.robot_id}>
+              <div className="alloc-header">
+                <div>
+                  <strong className="alloc-name">{robot.robot_id}</strong>
+                  <span className={`badge ${stateClass(robot.state)}`}>{stateLabel(robot.state)}</span>
+                </div>
+                <div className="alloc-battery">
+                  <div className="battery-track small">
+                    <span
+                      className={robot.battery_percent < 20 ? "low" : robot.battery_percent < 50 ? "mid" : "high"}
+                      style={{ width: `${Math.max(0, Math.min(100, robot.battery_percent ?? 0))}%` }}
+                    />
+                  </div>
+                  <span className="alloc-pct">{robot.battery_percent ?? "-"}%</span>
+                </div>
+              </div>
+              <dl>
+                <div>
+                  <dt>진행 작업</dt>
+                  <dd>{active ? active.mission_id : <span className="muted">없음</span>}</dd>
+                </div>
+                <div>
+                  <dt>수요 등급</dt>
+                  <dd>
+                    {active?.demand_class ? (
+                      <em className={`demand-pill ${active.demand_class.toLowerCase()}`}>
+                        {active.demand_class}등급
+                      </em>
+                    ) : <span className="muted">-</span>}
+                  </dd>
+                </div>
+                <div><dt>대기 중</dt><dd>{pending}건</dd></div>
+                <div><dt>위치</dt><dd>{robot.location || "-"}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="empty">등록된 로봇이 없습니다.</p>
+      )}
     </section>
   );
 }
+
+// ── Carousel ───────────────────────────────────────────────────────────────
 
 function Carousel({ title, description, items, renderItem, emptyText }) {
   const [index, setIndex] = useState(0);
@@ -282,20 +406,11 @@ function Carousel({ title, description, items, renderItem, emptyText }) {
   const activeIndex = hasItems ? Math.min(index, items.length - 1) : 0;
 
   useEffect(() => {
-    if (index > items.length - 1) {
-      setIndex(Math.max(items.length - 1, 0));
-    }
+    if (index > items.length - 1) setIndex(Math.max(items.length - 1, 0));
   }, [index, items.length]);
 
-  const previous = () => {
-    if (!hasItems) return;
-    setIndex((value) => (value - 1 + items.length) % items.length);
-  };
-
-  const next = () => {
-    if (!hasItems) return;
-    setIndex((value) => (value + 1) % items.length);
-  };
+  const previous = () => { if (hasItems) setIndex((v) => (v - 1 + items.length) % items.length); };
+  const next = () => { if (hasItems) setIndex((v) => (v + 1) % items.length); };
 
   return (
     <>
@@ -304,10 +419,10 @@ function Carousel({ title, description, items, renderItem, emptyText }) {
           <h2>{title}</h2>
           <p>{description}</p>
         </div>
-        <div className="carousel-actions" aria-label={`${title} 회전목마 제어`}>
-          <button className="icon-button" type="button" onClick={previous} disabled={!hasItems} title="이전">‹</button>
+        <div className="carousel-actions">
+          <button className="icon-button" type="button" onClick={previous} disabled={!hasItems}>‹</button>
           <span>{hasItems ? `${activeIndex + 1} / ${items.length}` : "0 / 0"}</span>
-          <button className="icon-button" type="button" onClick={next} disabled={!hasItems} title="다음">›</button>
+          <button className="icon-button" type="button" onClick={next} disabled={!hasItems}>›</button>
         </div>
       </div>
 
@@ -341,21 +456,9 @@ function Carousel({ title, description, items, renderItem, emptyText }) {
   );
 }
 
-function RobotCards({ robots }) {
-  return (
-    <section className="panel robot-panel">
-      <Carousel
-        title="로봇 카드"
-        description="위치, 배터리, 현재 작업을 한 장씩 넘겨 확인합니다."
-        items={robots}
-        renderItem={(robot) => <RobotCard robot={robot} />}
-        emptyText="등록된 로봇이 없습니다."
-      />
-    </section>
-  );
-}
+// ── Robot card ─────────────────────────────────────────────────────────────
 
-function RobotCard({ robot }) {
+function RobotCard({ robot, onDelete }) {
   const battery = robot.battery_percent == null ? 0 : robot.battery_percent;
   const batteryClass = battery < 20 ? "low" : battery < 50 ? "mid" : "high";
   const pose = robot.pose_x_m == null || robot.pose_y_m == null
@@ -373,7 +476,9 @@ function RobotCard({ robot }) {
       </div>
 
       <div className="battery-row">
-        <div className="battery-track"><span className={batteryClass} style={{ width: `${Math.max(0, Math.min(100, battery))}%` }} /></div>
+        <div className="battery-track">
+          <span className={batteryClass} style={{ width: `${Math.max(0, Math.min(100, battery))}%` }} />
+        </div>
         <strong>{robot.battery_percent == null ? "-" : robot.battery_percent}%</strong>
       </div>
 
@@ -386,82 +491,87 @@ function RobotCard({ robot }) {
         <div><dt>상태</dt><dd>{robot.message || "-"}</dd></div>
       </dl>
 
-      <div className="chip-row">{robot.estop ? <span className="chip danger">E-STOP</span> : null}</div>
+      <div className="chip-row">
+        {robot.estop ? <span className="chip danger">E-STOP</span> : null}
+        {battery < 20 ? <span className="chip warn">배터리 부족</span> : null}
+        {onDelete && (
+          <button className="cancel-button robot-delete-btn" onClick={() => onDelete(robot.robot_id)}>
+            삭제
+          </button>
+        )}
+      </div>
     </article>
   );
 }
 
-function MapPanel({ robots }) {
-  return (
-    <section className="panel map-panel">
-      <div className="panel-header">
-        <div>
-          <h2>작업 구역</h2>
-          <p>HSFI 피킹 위치 4곳과 모바일 매니퓰레이터 위치</p>
-        </div>
-        <span className="panel-note">WAREHOUSE_A</span>
-      </div>
-      <div className="fleet-map">
-        <div className="map-zone dock"><strong>HOME</strong><span>대기/충전</span></div>
-        <div className="map-zone drop"><strong>DROP</strong><span>BOX_DROP_ZONE_1</span></div>
-        <div className="rack-bank hot"><strong>A HOT</strong><span>68 racks</span></div>
-        <div className="rack-bank steady"><strong>B STANDARD</strong><span>157 racks</span></div>
-        <div className="rack-bank slow"><strong>C LONGTAIL</strong><span>225 racks</span></div>
-        <div className="map-path main" />
-        <div className="map-path branch branch-a" />
-        <div className="map-path branch branch-b" />
-        {STATIONS.map((station) => (
-          <div key={station.id} className="map-zone pick-station" style={{ left: `${station.x}%`, top: `${station.y}%` }}>
-            <strong>{station.label}</strong>
-            <span>{station.id}</span>
-          </div>
-        ))}
-        {robots.length ? robots.map((robot, index) => <RobotMarker key={robot.robot_id} robot={robot} index={index} />) : (
-          <p className="map-empty">로봇 위치 데이터 없음</p>
-        )}
-      </div>
-    </section>
-  );
-}
+// ── Robot carousel (대시보드용) ─────────────────────────────────────────────
 
-function RobotMarker({ robot, index }) {
-  const hasPose = robot.pose_x_m != null && robot.pose_y_m != null;
-  const x = hasPose ? Math.max(4, Math.min(96, Number(robot.pose_x_m) * 9)) : 72 + index * 5;
-  const y = hasPose ? Math.max(4, Math.min(96, 100 - Number(robot.pose_y_m) * 9)) : 78;
-  const heading = robot.heading_deg == null ? 0 : robot.heading_deg;
-
+function RobotCarousel({ robots }) {
   return (
-    <>
-      <div
-        className={`robot-marker ${stateClass(robot.state)}`}
-        style={{ left: `${x}%`, top: `${y}%`, transform: `translate(-50%, -50%) rotate(${heading}deg)` }}
-      >
-        <span />
-      </div>
-      <div className="marker-label" style={{ left: `${x}%`, top: `calc(${y}% + 18px)` }}>{robot.robot_id}</div>
-    </>
-  );
-}
-
-function StationPanel({ missions }) {
-  return (
-    <section className="panel station-panel">
+    <section className="panel robot-panel">
       <Carousel
-        title="HSFI 피킹 위치"
-        description="한 번 이동 후 박스에 20~30장을 담는 작업 기준"
-        items={STATIONS}
-        renderItem={(station) => <StationCard station={station} missions={missions} />}
-        emptyText="등록된 피킹 위치가 없습니다."
+        title="로봇 카드"
+        description="위치·배터리·현재 작업 상태"
+        items={robots}
+        renderItem={(robot) => <RobotCard robot={robot} />}
+        emptyText="등록된 로봇이 없습니다."
       />
     </section>
   );
 }
 
+// ── Robots tab (로봇 관리) ──────────────────────────────────────────────────
+
+function RobotsTab({ robots, openRobotModal, onDelete }) {
+  return (
+    <section className="panel robots-panel">
+      <div className="panel-header">
+        <div>
+          <h2>로봇 관리</h2>
+          <p>모바일 매니퓰레이터 등록 및 현재 상태</p>
+        </div>
+        <button onClick={openRobotModal}>로봇 추가</button>
+      </div>
+      {robots.length ? (
+        <div className="robot-grid">
+          {robots.map((robot) => (
+            <RobotCard key={robot.robot_id} robot={robot} onDelete={onDelete} />
+          ))}
+        </div>
+      ) : (
+        <p className="empty robots-empty">
+          등록된 로봇이 없습니다. 로봇 추가를 눌러 등록하세요.
+        </p>
+      )}
+    </section>
+  );
+}
+
+// ── Station grid ───────────────────────────────────────────────────────────
+
+function StationGrid({ missions }) {
+  return (
+    <section className="panel station-panel">
+      <div className="panel-header">
+        <div>
+          <h2>HSFI 피킹 위치</h2>
+          <p>한 번 이동 후 박스에 20~30장을 담는 작업 기준</p>
+        </div>
+      </div>
+      <div className="station-grid">
+        {STATIONS.map((station) => (
+          <StationCard key={station.id} station={station} missions={missions} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function StationCard({ station, missions }) {
-  const related = missions.filter((mission) => missionStations(mission).includes(station.id));
-  const waiting = related.filter((mission) => PENDING_STATES.has(mission.state)).length;
-  const active = related.filter((mission) => ACTIVE_STATES.has(mission.state)).length;
-  const failed = related.filter((mission) => ISSUE_STATES.has(mission.state)).length;
+  const related = missions.filter((m) => missionStations(m).includes(station.id));
+  const waiting = related.filter((m) => PENDING_STATES.has(m.state)).length;
+  const active = related.filter((m) => ACTIVE_STATES.has(m.state)).length;
+  const failed = related.filter((m) => ISSUE_STATES.has(m.state)).length;
   const status = active ? "작업 중" : waiting ? "대기 있음" : failed ? "확인 필요" : "대기";
   const statusClass = active ? "active" : failed ? "danger" : waiting ? "waiting" : "idle";
 
@@ -481,89 +591,53 @@ function StationCard({ station, missions }) {
   );
 }
 
-function SequencePanel() {
-  return (
-    <section className="panel flow-panel">
-      <div className="panel-header">
-        <div>
-          <h2>배치 피킹 시퀀스</h2>
-          <p>WMS 주문을 로봇 미션으로 바꾸는 실제 흐름</p>
-        </div>
-      </div>
-      <ol className="sequence">
-        {WORKFLOW_STEPS.map((step, index) => (
-          <li key={step.label}>
-            <span>{index + 1}</span>
-            <div>
-              <strong>{step.label}</strong>
-              <em>{step.text}</em>
-            </div>
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
+// ── Work queue ─────────────────────────────────────────────────────────────
 
-function OperationsStrip({ robots, missions }) {
-  const activeRobot = robots.find((robot) => robot.current_mission_id)
-    || robots.find((robot) => robot.state !== "offline")
-    || robots[0];
-  const nextMission = missions.find((mission) => ACTIVE_STATES.has(mission.state))
-    || missions.find((mission) => PENDING_STATES.has(mission.state));
-  const stations = nextMission ? missionStations(nextMission) : [];
+const WORK_FILTERS = [
+  { id: "all", label: "전체" },
+  { id: "pending", label: "대기" },
+  { id: "active", label: "진행 중" },
+  { id: "done", label: "완료" },
+  { id: "issue", label: "실패/취소" },
+];
 
-  return (
-    <section className="ops-strip">
-      <div>
-        <span>현재 로봇</span>
-        <strong>{activeRobot ? activeRobot.robot_id : "-"}</strong>
-      </div>
-      <div>
-        <span>현재 위치</span>
-        <strong>{activeRobot ? activeRobot.location || "-" : "-"}</strong>
-      </div>
-      <div>
-        <span>다음 작업</span>
-        <strong>{nextMission ? nextMission.mission_id : "-"}</strong>
-      </div>
-      <div>
-        <span>피킹 위치</span>
-        <strong>{stations.length ? stations.join(" / ") : "-"}</strong>
-      </div>
-    </section>
-  );
-}
+function WorkQueue({ missions, onCancel }) {
+  const [filter, setFilter] = useState("all");
 
-function WorkQueue({ missions }) {
+  const filtered = useMemo(() => {
+    if (filter === "pending") return missions.filter((m) => PENDING_STATES.has(m.state));
+    if (filter === "active") return missions.filter((m) => ACTIVE_STATES.has(m.state));
+    if (filter === "done") return missions.filter((m) => m.state === "COMPLETED");
+    if (filter === "issue") return missions.filter((m) => ISSUE_STATES.has(m.state));
+    return missions;
+  }, [missions, filter]);
+
   return (
     <section className="panel queue-panel">
       <div className="panel-header">
         <div>
           <h2>작업 큐</h2>
-          <p>작업 지시와 진행 상태</p>
+          <p>작업 지시와 진행 상태 — 접수~완료 전체 이력</p>
         </div>
+      </div>
+      <div className="filter-tabs">
+        {WORK_FILTERS.map((f) => (
+          <button key={f.id} className={`filter-tab ${filter === f.id ? "active" : ""}`} onClick={() => setFilter(f.id)}>
+            {f.label}
+          </button>
+        ))}
       </div>
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>작업 ID</th>
-              <th>상태</th>
-              <th>로봇</th>
-              <th>수요</th>
-              <th>렉 그룹</th>
-              <th>피킹 위치</th>
-              <th>박스</th>
-              <th>수량</th>
-              <th>우선</th>
-              <th>점수</th>
-              <th>하차 위치</th>
-              <th>메시지</th>
+              <th>작업 ID</th><th>상태</th><th>로봇</th><th>수요</th>
+              <th>렉 그룹</th><th>피킹 위치</th><th>박스</th><th>수량</th>
+              <th>우선</th><th>하차 위치</th><th>메시지</th><th />
             </tr>
           </thead>
           <tbody>
-            {missions.length ? missions.map((mission) => (
+            {filtered.length ? filtered.map((mission) => (
               <tr key={mission.mission_id}>
                 <td><strong>{mission.mission_id}</strong></td>
                 <td><span className={`badge ${stateClass(mission.state)}`}>{stateLabel(mission.state)}</span></td>
@@ -574,9 +648,13 @@ function WorkQueue({ missions }) {
                 <td>{mission.box_id || "-"}</td>
                 <td>{mission.picked_quantity || 0} / {mission.target_quantity || "-"}</td>
                 <td>{mission.priority || "-"}</td>
-                <td>{mission.assignment_score || "-"}</td>
                 <td>{mission.place_location}</td>
                 <td>{mission.error_code || mission.message || "-"}</td>
+                <td>
+                  {CANCELLABLE_STATES.has(mission.state) && (
+                    <button className="cancel-button" onClick={() => onCancel(mission.mission_id)}>취소</button>
+                  )}
+                </td>
               </tr>
             )) : (
               <tr><td colSpan="12" className="empty">작업 지시가 없습니다.</td></tr>
@@ -587,6 +665,8 @@ function WorkQueue({ missions }) {
     </section>
   );
 }
+
+// ── Event log ──────────────────────────────────────────────────────────────
 
 function EventLog({ missions }) {
   const events = useMemo(() => {
@@ -600,10 +680,7 @@ function EventLog({ missions }) {
   return (
     <section className="panel log-panel">
       <div className="panel-header">
-        <div>
-          <h2>최근 이벤트</h2>
-          <p>작업 접수, 배정, 실패 이력</p>
-        </div>
+        <div><h2>최근 이벤트</h2><p>작업 접수, 배정, 실패 이력</p></div>
       </div>
       <div className="event-log">
         {events.length ? events.map((event, index) => (
@@ -619,6 +696,8 @@ function EventLog({ missions }) {
   );
 }
 
+// ── Modals ─────────────────────────────────────────────────────────────────
+
 function Modal({ open, title, description, children, onClose, wide }) {
   if (!open) return null;
   return (
@@ -626,10 +705,7 @@ function Modal({ open, title, description, children, onClose, wide }) {
       <div className="modal-backdrop" onClick={onClose} />
       <section className={`modal-dialog ${wide ? "wide-dialog" : ""}`}>
         <div className="modal-header">
-          <div>
-            <h2>{title}</h2>
-            <p>{description}</p>
-          </div>
+          <div><h2>{title}</h2><p>{description}</p></div>
           <button className="ghost-button" onClick={onClose}>닫기</button>
         </div>
         {children}
@@ -648,8 +724,24 @@ function RobotModal({ open, onClose, onSubmit }) {
         <label>X 좌표 m<input name="pose_x_m" type="number" step="0.1" defaultValue="2.4" /></label>
         <label>Y 좌표 m<input name="pose_y_m" type="number" step="0.1" defaultValue="1.8" /></label>
         <label>방향 deg<input name="heading_deg" type="number" step="1" defaultValue="90" /></label>
-        <label>모드<select name="mode" defaultValue="AUTO"><option value="AUTO">AUTO</option><option value="MANUAL">MANUAL</option><option value="MAINTENANCE">MAINTENANCE</option></select></label>
-        <label>상태<select name="state" defaultValue="idle"><option value="idle">대기</option><option value="offline">오프라인</option><option value="moving">이동 중</option><option value="picking">피킹 중</option><option value="error">장애</option></select></label>
+        <label>
+          모드
+          <select name="mode" defaultValue="AUTO">
+            <option value="AUTO">AUTO</option>
+            <option value="MANUAL">MANUAL</option>
+            <option value="MAINTENANCE">MAINTENANCE</option>
+          </select>
+        </label>
+        <label>
+          상태
+          <select name="state" defaultValue="idle">
+            <option value="idle">대기</option>
+            <option value="offline">오프라인</option>
+            <option value="moving">이동 중</option>
+            <option value="picking">피킹 중</option>
+            <option value="error">장애</option>
+          </select>
+        </label>
         <div className="modal-actions">
           <button type="button" className="secondary-button" onClick={onClose}>취소</button>
           <button type="submit">로봇 등록</button>
@@ -666,10 +758,25 @@ function WorkOrderModal({ open, onClose, onSubmit }) {
         <label>로봇 ID<input name="robot_id" defaultValue="mobile_manipulator_01" /></label>
         <label>박스 ID<input name="box_id" defaultValue="BOX-001" /></label>
         <label>목표 수량<input name="target_quantity" type="number" min="20" max="30" defaultValue="28" required /></label>
-        <label>수요 등급<select name="demand_class" defaultValue="A"><option value="A">A급 핫존</option><option value="B">B급 표준존</option><option value="C">C급 롱테일</option></select></label>
+        <label>
+          수요 등급
+          <select name="demand_class" defaultValue="A">
+            <option value="A">A 고회전</option>
+            <option value="B">B 중회전</option>
+            <option value="C">C 저회전</option>
+          </select>
+        </label>
         <label>렉 그룹<input name="rack_group" defaultValue="R001-R068" required /></label>
-        <label>우선순위<select name="priority" defaultValue="1"><option value="1">1 긴급</option><option value="2">2 높음</option><option value="3">3 일반</option><option value="4">4 낮음</option><option value="5">5 보류</option></select></label>
-        <label>배정 점수<input name="assignment_score" type="number" min="0" defaultValue="42" /></label>
+        <label>
+          우선순위
+          <select name="priority" defaultValue="1">
+            <option value="1">1 긴급</option>
+            <option value="2">2 높음</option>
+            <option value="3">3 일반</option>
+            <option value="4">4 낮음</option>
+            <option value="5">5 보류</option>
+          </select>
+        </label>
         <label>하차 위치<input name="place_location" defaultValue="BOX_DROP_ZONE_1" required /></label>
         <label>대상<input name="target" defaultValue="top_garment" required /></label>
         <fieldset className="station-selector">
@@ -690,6 +797,8 @@ function WorkOrderModal({ open, onClose, onSubmit }) {
   );
 }
 
+// ── App ────────────────────────────────────────────────────────────────────
+
 function App() {
   const [robots, setRobots] = useState([]);
   const [missions, setMissions] = useState([]);
@@ -697,110 +806,151 @@ function App() {
   const [robotModalOpen, setRobotModalOpen] = useState(false);
   const [workModalOpen, setWorkModalOpen] = useState(false);
   const [lastUpdated, setLastUpdated] = useState("");
+  const [isConnected, setIsConnected] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [toasts, setToasts] = useState([]);
 
-  const refresh = async () => {
-    const [robotRows, missionRows] = await Promise.all([
-      apiRequest("/api/robots"),
-      apiRequest("/api/missions"),
-    ]);
-    setRobots(robotRows);
-    setMissions(missionRows);
-    setLastUpdated(`마지막 갱신 ${new Date().toLocaleTimeString("ko-KR", { hour12: false })}`);
-  };
+  const addToast = useCallback((message, type = "success") => {
+    const id = Date.now();
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+  }, []);
 
-  useEffect(() => {
-    refresh().catch(console.error);
-    const timer = setInterval(() => refresh().catch(console.error), 3000);
-    return () => clearInterval(timer);
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [robotRows, missionRows] = await Promise.all([
+        apiRequest("/api/robots"),
+        apiRequest("/api/missions"),
+      ]);
+      setRobots(robotRows);
+      setMissions(missionRows);
+      setIsConnected(true);
+      setLastUpdated(`갱신 ${new Date().toLocaleTimeString("ko-KR", { hour12: false })}`);
+    } catch {
+      setIsConnected(false);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    const onKey = (event) => {
-      if (event.key === "Escape") {
-        setRobotModalOpen(false);
-        setWorkModalOpen(false);
-      }
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") { setRobotModalOpen(false); setWorkModalOpen(false); }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
   const addSampleRobots = async () => {
-    const sampleRobots = [
-      { robot_id: "mobile_manipulator_01", state: "moving", battery_percent: 92, location: "A_HOT_AISLE", pose_x_m: 2.8, pose_y_m: 8.1, heading_deg: 35 },
+    const samples = [
+      { robot_id: "mobile_manipulator_01", state: "moving", battery_percent: 92, location: "A_고회전_통로", pose_x_m: 2.8, pose_y_m: 8.1, heading_deg: 35 },
       { robot_id: "mobile_manipulator_02", state: "idle", battery_percent: 87, location: "HSFI_PICK_STATION_2", pose_x_m: 5.2, pose_y_m: 6.4, heading_deg: 90 },
-      { robot_id: "mobile_manipulator_03", state: "picking", battery_percent: 76, location: "B_STANDARD_AISLE", pose_x_m: 7.6, pose_y_m: 4.2, heading_deg: 180 },
+      { robot_id: "mobile_manipulator_03", state: "picking", battery_percent: 76, location: "B_중회전_통로", pose_x_m: 7.6, pose_y_m: 4.2, heading_deg: 180 },
       { robot_id: "mobile_manipulator_04", state: "idle", battery_percent: 69, location: "HOME_DOCK", pose_x_m: 8.4, pose_y_m: 1.8, heading_deg: 0 },
     ];
-    await Promise.all(sampleRobots.map((robot) => apiRequest(`/api/robots/${robot.robot_id}/state`, {
-      method: "POST",
-      body: JSON.stringify({
-        state: robot.state,
-        battery_percent: robot.battery_percent,
-        location: robot.location,
-        map_id: "WAREHOUSE_A",
-        pose_x_m: robot.pose_x_m,
-        pose_y_m: robot.pose_y_m,
-        heading_deg: robot.heading_deg,
-        velocity_mps: robot.state === "moving" ? 0.7 : 0,
-        mode: "AUTO",
-        message: "demand allocation ready",
-      }),
-    })));
-    await refresh();
+    try {
+      await Promise.all(samples.map((r) =>
+        apiRequest(`/api/robots/${r.robot_id}/state`, {
+          method: "POST",
+          body: JSON.stringify({ ...r, map_id: "WAREHOUSE_A", velocity_mps: r.state === "moving" ? 0.7 : 0, mode: "AUTO" }),
+        }),
+      ));
+      addToast("샘플 로봇 4대 등록 완료");
+      await refresh();
+    } catch (err) {
+      addToast(`샘플 등록 실패: ${err.message}`, "error");
+    }
   };
 
   const submitRobot = async (event) => {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const robotId = formData.get("robot_id");
-    await apiRequest(`/api/robots/${encodeURIComponent(robotId)}/state`, {
-      method: "POST",
-      body: JSON.stringify({
-        state: formData.get("state"),
-        battery_percent: Number(formData.get("battery_percent")) || null,
-        location: formData.get("location"),
-        map_id: "WAREHOUSE_A",
-        pose_x_m: Number(formData.get("pose_x_m")) || 0,
-        pose_y_m: Number(formData.get("pose_y_m")) || 0,
-        heading_deg: Number(formData.get("heading_deg")) || 0,
-        velocity_mps: 0,
-        mode: formData.get("mode"),
-        message: "registered from web",
-      }),
-    });
-    setRobotModalOpen(false);
-    await refresh();
+    const fd = new FormData(event.currentTarget);
+    const robotId = fd.get("robot_id");
+    try {
+      await apiRequest(`/api/robots/${encodeURIComponent(robotId)}/state`, {
+        method: "POST",
+        body: JSON.stringify({
+          state: fd.get("state"),
+          battery_percent: Number(fd.get("battery_percent")) || null,
+          location: fd.get("location"),
+          map_id: "WAREHOUSE_A",
+          pose_x_m: Number(fd.get("pose_x_m")) || 0,
+          pose_y_m: Number(fd.get("pose_y_m")) || 0,
+          heading_deg: Number(fd.get("heading_deg")) || 0,
+          velocity_mps: 0,
+          mode: fd.get("mode"),
+          message: "registered from web",
+        }),
+      });
+      setRobotModalOpen(false);
+      addToast(`${robotId} 등록 완료`);
+      await refresh();
+    } catch (err) {
+      addToast(`등록 실패: ${err.message}`, "error");
+    }
   };
 
   const submitWorkOrder = async (event) => {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const pickupStations = formData.getAll("pickup_stations");
+    const fd = new FormData(event.currentTarget);
+    const pickupStations = fd.getAll("pickup_stations");
     if (!pickupStations.length) {
-      alert("피킹 위치를 하나 이상 선택하세요.");
+      addToast("피킹 위치를 하나 이상 선택하세요.", "error");
       return;
     }
+    try {
+      const mission = await apiRequest("/api/missions", {
+        method: "POST",
+        body: JSON.stringify({
+          robot_id: fd.get("robot_id") || null,
+          task_type: "box_batch_pick",
+          station_id: pickupStations[0],
+          pickup_stations: pickupStations,
+          box_id: fd.get("box_id") || null,
+          target_quantity: Number(fd.get("target_quantity")) || 25,
+          rack_group: fd.get("rack_group") || null,
+          demand_class: fd.get("demand_class") || null,
+          priority: Number(fd.get("priority")) || 3,
+          target: fd.get("target"),
+          place_location: fd.get("place_location"),
+        }),
+      });
+      setWorkModalOpen(false);
+      addToast(`${mission.mission_id} 생성 완료`);
+      await refresh();
+    } catch (err) {
+      addToast(`작업 생성 실패: ${err.message}`, "error");
+    }
+  };
 
-    await apiRequest("/api/missions", {
-      method: "POST",
-      body: JSON.stringify({
-        robot_id: formData.get("robot_id") || null,
-        task_type: "box_batch_pick",
-        station_id: pickupStations[0],
-        pickup_stations: pickupStations,
-        box_id: formData.get("box_id") || null,
-        target_quantity: Number(formData.get("target_quantity")) || 25,
-        rack_group: formData.get("rack_group") || null,
-        demand_class: formData.get("demand_class") || null,
-        priority: Number(formData.get("priority")) || 3,
-        assignment_score: Number(formData.get("assignment_score")) || null,
-        target: formData.get("target"),
-        place_location: formData.get("place_location"),
-      }),
-    });
-    setWorkModalOpen(false);
-    await refresh();
+  const cancelMission = async (missionId) => {
+    try {
+      await apiRequest(`/api/missions/${encodeURIComponent(missionId)}/state`, {
+        method: "POST",
+        body: JSON.stringify({ state: "CANCELED", message: "canceled from web" }),
+      });
+      addToast(`${missionId} 취소됨`);
+      await refresh();
+    } catch (err) {
+      addToast(`취소 실패: ${err.message}`, "error");
+    }
+  };
+
+  const deleteRobot = async (robotId) => {
+    try {
+      await apiRequest(`/api/robots/${encodeURIComponent(robotId)}`, { method: "DELETE" });
+      addToast(`${robotId} 삭제됨`);
+      await refresh();
+    } catch (err) {
+      addToast(`삭제 실패: ${err.message}`, "error");
+    }
   };
 
   return (
@@ -810,46 +960,41 @@ function App() {
         setActiveTab={setActiveTab}
         openRobotModal={() => setRobotModalOpen(true)}
         openWorkModal={() => setWorkModalOpen(true)}
+        onSampleData={addSampleRobots}
         refresh={refresh}
         lastUpdated={lastUpdated}
+        isConnected={isConnected}
+        loading={loading}
       />
 
-      <main className="layout">
-        {activeTab === "dashboard" && <CommandPanel robots={robots} missions={missions} openWorkModal={() => setWorkModalOpen(true)} />}
+      {!isConnected && <ErrorBanner />}
 
+      <main className="layout">
         <Summary robots={robots} missions={missions} />
 
         {activeTab === "dashboard" && (
           <>
-            <OperationsStrip robots={robots} missions={missions} />
+            <MapPanel robots={robots} missions={missions} />
             <DemandPanel missions={missions} />
             <AllocationPanel robots={robots} missions={missions} />
-            <RobotCards robots={robots} />
-            <MapPanel robots={robots} />
-            <StationPanel missions={missions} />
-            <SequencePanel />
+            <RobotCarousel robots={robots} />
+            <StationGrid missions={missions} />
           </>
         )}
 
-        {activeTab === "work" && <WorkQueue missions={missions} />}
-        {activeTab === "events" && <EventLog missions={missions} />}
-
-        {activeTab === "dashboard" && (
-          <section className="panel quick-panel">
-            <div className="panel-header">
-              <div>
-                <h2>빠른 작업</h2>
-                <p>개발 중 테스트용 작업</p>
-              </div>
-            </div>
-            <div className="quick-actions">
-              <button className="secondary-button" onClick={addSampleRobots}>4대 로봇 샘플 등록</button>
-              <button onClick={() => setWorkModalOpen(true)}>배치 피킹 작업 생성</button>
-            </div>
-          </section>
+        {activeTab === "robots" && (
+          <RobotsTab
+            robots={robots}
+            openRobotModal={() => setRobotModalOpen(true)}
+            onDelete={deleteRobot}
+          />
         )}
+
+        {activeTab === "work" && <WorkQueue missions={missions} onCancel={cancelMission} />}
+        {activeTab === "events" && <EventLog missions={missions} />}
       </main>
 
+      <Toasts toasts={toasts} />
       <RobotModal open={robotModalOpen} onClose={() => setRobotModalOpen(false)} onSubmit={submitRobot} />
       <WorkOrderModal open={workModalOpen} onClose={() => setWorkModalOpen(false)} onSubmit={submitWorkOrder} />
     </>
