@@ -41,11 +41,15 @@ Robot Bridge
 ```text
 Frontend: React + Vite
 Backend: FastAPI
-Runtime API: REST
-실시간화 예정: WebSocket 또는 Server-Sent Events
-DB 예정: PostgreSQL
-현재 저장소: 메모리 저장
+Main DB: PostgreSQL
+Realtime State: Redis
+Robot Event / Mission Queue: MQTT 우선, Kafka/Redpanda 확장
+Robot: ROS2 Bridge
+Deployment: Docker Compose
+Monitoring: Prometheus + Grafana
 ```
+
+현재 MVP 코드는 아직 메모리 저장소를 사용합니다. 전체 목표 구조는 `docs/architecture.md`에 정리했습니다.
 
 현재 PC의 Node 버전이 v12라 Vite는 Node 12에서 동작 가능한 버전으로 고정했습니다.
 운영 또는 장기 개발 전에는 Node 20 LTS로 올리고 최신 Vite로 업데이트하는 것이 좋습니다.
@@ -65,7 +69,12 @@ frontend/
   src/styles.css      화면 스타일
 
 docs/
+  architecture.md    현업형 전체 아키텍처
   workflow.md         전체 연동 흐름
+
+infra/
+  mosquitto/          MQTT 브로커 설정
+  prometheus/         Prometheus 설정
 
 scripts/
   run_dev.sh          개발 서버 실행
@@ -99,6 +108,30 @@ http://127.0.0.1:8081
 ```bash
 BACKEND_PORT=8090 FRONTEND_PORT=5174 ./scripts/run_dev.sh
 ```
+
+## 인프라 실행 골격
+
+PostgreSQL, Redis, MQTT, Kafka 호환 브로커, Prometheus, Grafana는 아래 compose 파일로 띄울 수 있게 골격을 잡았습니다.
+
+```bash
+cd /home/bp/fleet
+cp .env.example .env
+docker compose -f docker-compose.infra.yml up -d
+```
+
+접속 포트:
+
+```text
+PostgreSQL: 5432
+Redis: 6379
+MQTT: 1883
+MQTT WebSocket: 9001
+Kafka compatible broker: 19092
+Prometheus: 9090
+Grafana: 3000
+```
+
+Grafana 초기 계정은 `.env` 기준으로 `admin / admin`입니다. 운영에서는 반드시 바꿔야 합니다.
 
 ## MVP API
 

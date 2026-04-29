@@ -10,6 +10,7 @@ frontend/dist/
 # Local runtime/config files
 .env
 .env.*
+!.env.example
 *.log
 
 # Accidental nested checkout
