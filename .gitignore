@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Local runtime/config files
+.env
+.env.*
+*.log
+
+# Accidental nested checkout
+fleet/
