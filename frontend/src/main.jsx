@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -11,9 +11,6 @@ const STATIONS = [
   { id: "HSFI_PICK_STATION_3", label: "HSFI 3", x: 46, y: 26 },
   { id: "HSFI_PICK_STATION_4", label: "HSFI 4", x: 46, y: 64 },
 ];
-
-const RACK_TOTAL = 450;
-const SKU_PER_RACK = 28;
 
 const DEMAND_CLASSES = [
   { id: "A", label: "A 고회전", racks: 68, share: 58, color: "hot", note: "우선 출고 대상" },
@@ -398,64 +395,6 @@ function AllocationPanel({ robots, missions }) {
   );
 }
 
-// ── Carousel ───────────────────────────────────────────────────────────────
-
-function Carousel({ title, description, items, renderItem, emptyText }) {
-  const [index, setIndex] = useState(0);
-  const hasItems = items.length > 0;
-  const activeIndex = hasItems ? Math.min(index, items.length - 1) : 0;
-
-  useEffect(() => {
-    if (index > items.length - 1) setIndex(Math.max(items.length - 1, 0));
-  }, [index, items.length]);
-
-  const previous = () => { if (hasItems) setIndex((v) => (v - 1 + items.length) % items.length); };
-  const next = () => { if (hasItems) setIndex((v) => (v + 1) % items.length); };
-
-  return (
-    <>
-      <div className="carousel-header">
-        <div>
-          <h2>{title}</h2>
-          <p>{description}</p>
-        </div>
-        <div className="carousel-actions">
-          <button className="icon-button" type="button" onClick={previous} disabled={!hasItems}>‹</button>
-          <span>{hasItems ? `${activeIndex + 1} / ${items.length}` : "0 / 0"}</span>
-          <button className="icon-button" type="button" onClick={next} disabled={!hasItems}>›</button>
-        </div>
-      </div>
-
-      {hasItems ? (
-        <>
-          <div className="carousel-viewport">
-            <div className="carousel-track" style={{ transform: `translateX(-${activeIndex * 100}%)` }}>
-              {items.map((item) => (
-                <div className="carousel-slide" key={item.robot_id || item.id}>
-                  {renderItem(item)}
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="carousel-dots">
-            {items.map((item, dotIndex) => (
-              <button
-                key={item.robot_id || item.id}
-                className={`carousel-dot ${dotIndex === activeIndex ? "active" : ""}`}
-                type="button"
-                onClick={() => setIndex(dotIndex)}
-                aria-label={`${dotIndex + 1}번 보기`}
-              />
-            ))}
-          </div>
-        </>
-      ) : (
-        <p className="empty">{emptyText}</p>
-      )}
-    </>
-  );
-}
-
 // ── Robot card ─────────────────────────────────────────────────────────────
 
 function RobotCard({ robot, onDelete }) {
@@ -504,18 +443,27 @@ function RobotCard({ robot, onDelete }) {
   );
 }
 
-// ── Robot carousel (대시보드용) ─────────────────────────────────────────────
+// ── Robot panel (대시보드용) ────────────────────────────────────────────────
 
-function RobotCarousel({ robots }) {
+function RobotPanel({ robots }) {
   return (
     <section className="panel robot-panel">
-      <Carousel
-        title="로봇 카드"
-        description="위치·배터리·현재 작업 상태"
-        items={robots}
-        renderItem={(robot) => <RobotCard robot={robot} />}
-        emptyText="등록된 로봇이 없습니다."
-      />
+      <div className="panel-header">
+        <div>
+          <h2>로봇 카드</h2>
+          <p>위치·배터리·현재 작업 상태</p>
+        </div>
+        <span className="panel-note">{robots.length}대</span>
+      </div>
+      {robots.length ? (
+        <div className="robot-grid">
+          {robots.map((robot) => (
+            <RobotCard key={robot.robot_id} robot={robot} />
+          ))}
+        </div>
+      ) : (
+        <p className="empty">등록된 로봇이 없습니다.</p>
+      )}
     </section>
   );
 }
@@ -977,7 +925,7 @@ function App() {
             <MapPanel robots={robots} missions={missions} />
             <DemandPanel missions={missions} />
             <AllocationPanel robots={robots} missions={missions} />
-            <RobotCarousel robots={robots} />
+            <RobotPanel robots={robots} />
             <StationGrid missions={missions} />
           </>
         )}

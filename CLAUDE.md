@@ -97,3 +97,8 @@ RECEIVED → ASSIGNED → NAVIGATING → ARRIVED → PICKING → PLACING → COM
 3. MQTT 로봇 이벤트 수신 → 미션 상태 자동 업데이트
 4. Node 20 LTS 업그레이드 후 Vite 최신 버전으로 교체
 5. WebSocket 또는 SSE로 폴링 대체 (실시간 지연 개선)
+
+
+## 참고
+
+1. 계획 및 생각은 opus 4.6, 코드 작성은 sonnet 4.6 으로 구현
